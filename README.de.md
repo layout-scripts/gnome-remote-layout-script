@@ -1,6 +1,6 @@
 # gnome-remote-layout-script
 
-`setup-gnome-remote.sh` macht aus einem headless Debian-, Ubuntu- oder anderen Debian-basierten Server eine Maschine, die über [Tailscale](https://tailscale.com/) als vollwertiger GNOME-Remote-Desktop erreichbar ist — mit Audio, USB-over-IP und vorbereiteten WebAuthn/FIDO2-Paketen. Am Bootverhalten ändert sich dabei nichts: Es gibt **keinen Display-Manager und keine grafische Anmeldung**. GNOME startet ausschließlich on-demand, sobald ein RDP-Client sich verbindet, und fährt danach wieder herunter.
+`setup-gnome-remote.sh` macht aus einem Debian-, Ubuntu- oder anderen Debian-basierten Server eine Maschine, die über [Tailscale](https://tailscale.com/) per GNOME Remote Desktop/RDP erreichbar ist — mit Audio, USB-over-IP und vorbereiteten WebAuthn/FIDO2-Paketen. Bei der Installation wählst du zwischen einem Single-User-Headless-Modus ohne Display-Manager und einem GDM-Remote-Login-Modus.
 
 ## Sprachen
 
@@ -10,13 +10,12 @@
 
 ## Was das Skript tut
 
-Auf einem Debian(-basierten) System mit `systemd` bietet das Skript vier unabhängig wählbare Komponenten an (alle in einem interaktiven `whiptail`-Auswahldialog vorausgewählt, in einem automatisierten Lauf werden alle installiert):
+Auf einem Debian(-basierten) System mit `systemd` bietet das Skript vier unabhängig wählbare Komponenten an (alle in einem interaktiven `whiptail`-Auswahldialog vorausgewählt, in einem automatisierten Lauf werden alle installiert). Wenn GNOME + RDP ausgewählt ist, fragt es zusätzlich den GNOME-RDP-Modus ab:
 
-- **GNOME + RDP, echt headless, on-demand**
-  - Installiert nur `gnome-session`, `gnome-shell`, `mutter` und `gnome-remote-desktop` — bewusst **nicht** die Metapakete `ubuntu-desktop`/`ubuntu-desktop-minimal`, da diese `gdm3` mitziehen und beim Installieren typischerweise auf `graphical.target` umstellen.
-  - Merkt sich `systemctl get-default` vor der Installation und setzt es zurück, falls eine Abhängigkeit es verändert hat — die Maschine bootet weiterhin in `multi-user.target`.
-  - Aktiviert den **systemweiten Headless-Modus** von `gnome-remote-desktop` (`gnome-remote-desktop.service`): Eine GNOME-Session wird automatisch nur bei einer RDP-Verbindung gestartet und danach wieder beendet — kein Ressourcenverbrauch im Leerlauf.
-  - Erzeugt bei Bedarf ein selbstsigniertes TLS-Zertifikat für RDP, konfiguriert es über `grdctl --system rdp set-tls-cert/-key` und fragt interaktiv nach RDP-Zugangsdaten (`grdctl --system rdp set-credentials`) — die Zugangsdaten werden ausschließlich an `grdctl` weitergereicht, nie vom Skript selbst gespeichert.
+- **GNOME + RDP**
+  - **Single-User-Headless**: installiert `gnome-session`, `gnome-shell`, `mutter` und `gnome-remote-desktop`, aktiviert `loginctl enable-linger` für einen ausgewählten Linux-Benutzer und startet dessen `gnome-remote-desktop-headless.service`. Der Server bleibt bei seinem bisherigen Default-Target, typischerweise `multi-user.target`; es wird kein GDM benötigt.
+  - **GDM Remote Login**: installiert zusätzlich `gdm3`, stellt auf `graphical.target` und aktiviert den systemweiten GNOME-Remote-Login-Pfad. Das ist näher am GNOME-Anmeldebildschirm, bringt aber bewusst einen Display-Manager mit.
+  - Erzeugt bei Bedarf ein selbstsigniertes TLS-Zertifikat für RDP, konfiguriert es über `grdctl` und fragt interaktiv nach RDP-Zugangsdaten — die Zugangsdaten werden ausschließlich an `grdctl` weitergereicht, nie vom Skript selbst gespeichert.
   - Beschränkt RDP (Port 3389) per `ufw` ausschließlich auf das Interface `tailscale0`.
 - **Audio (PipeWire)**: installiert `pipewire`, `pipewire-pulse`, `wireplumber` und aktiviert sie `--global`, damit Audio auch in der on-demand gestarteten Headless-RDP-Session funktioniert, ohne dass sich zuvor jemand interaktiv angemeldet hat.
 - **USB-over-IP (usbip)**: installiert `usbip` und das zum Kernel passende `linux-tools-<kernel>`-Paket, lädt die Kernelmodule `usbip-core`/`usbip_host`/`vhci-hcd` dauerhaft, schreibt eine kleine `usbipd.service`-Unit (Ubuntu liefert keine fertige mit) und beschränkt Port 3240 per `ufw` auf `tailscale0`.
@@ -25,6 +24,8 @@ Auf einem Debian(-basierten) System mit `systemd` bietet das Skript vier unabhä
 Bevor überhaupt an der Firewall etwas verändert wird, erlaubt das Skript immer zuerst SSH (`ufw allow OpenSSH`), damit sich eine Remote-Sitzung niemals selbst aussperren kann.
 
 Tailscale selbst wird bei Bedarf über das offizielle `https://tailscale.com/install.sh`-Skript installiert; ist es noch nicht angemeldet, gibt das Skript einen Hinweis aus, `sudo tailscale up` auszuführen, und macht danach weiter.
+
+GNOME Remote Desktop garantiert nicht, dass eine GUI-Session nach einem Netzwerkabbruch weiterläuft und später wieder verbunden werden kann. Für lange Jobs sollten `systemd`, `tmux` oder ein anderer nicht-GUI Mechanismus genutzt werden.
 
 ## Voraussetzungen
 
@@ -48,18 +49,26 @@ Tailscale selbst wird bei Bedarf über das offizielle `https://tailscale.com/ins
    sudo ./setup-gnome-remote.sh
    ```
 
+   Für automatisierte Läufe ohne Terminal:
+
+   ```bash
+   sudo LAYOUT_SCRIPT_ASSUME_YES=1 GNOME_REMOTE_MODE=single-user-headless GNOME_REMOTE_USER=<linux-user> ./setup-gnome-remote.sh
+   # oder:
+   sudo LAYOUT_SCRIPT_ASSUME_YES=1 GNOME_REMOTE_MODE=gdm-remote-login ./setup-gnome-remote.sh
+   ```
+
 3. Falls dazu aufgefordert, Tailscale anmelden (`sudo tailscale up`) und das Skript erneut ausführen.
 
 4. Prüfen:
 
    ```bash
-   systemctl get-default                 # sollte multi-user.target bleiben
-   systemctl status gnome-remote-desktop tailscaled usbipd
+   systemctl get-default                 # single-user: sollte multi-user.target bleiben; GDM: graphical.target
+   systemctl status tailscaled usbipd
    ufw status verbose                    # RDP/usbip nur auf tailscale0
    tailscale ip -4
    ```
 
-5. Von einem anderen Gerät im selben Tailnet einen RDP-Client mit `<Tailscale-IP>:3389` verbinden — eine GNOME-Session sollte automatisch starten, mit Audio über den RDP-Kanal.
+5. Von einem anderen Gerät im selben Tailnet einen RDP-Client mit `<Tailscale-IP>:3389` verbinden — je nach gewähltem Modus landet die Verbindung in der Single-User-Headless-Session oder im GDM-Remote-Login.
 
 ## Lizenz
 
