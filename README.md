@@ -1,6 +1,6 @@
 # gnome-remote-layout-script
 
-`setup-gnome-remote.sh` turns a Debian, Ubuntu, or other Debian-based server into a machine reachable through GNOME Remote Desktop/RDP over [Tailscale](https://tailscale.com/) — with audio, USB-over-IP, and WebAuthn/FIDO2 packages prepared. During installation, you choose between a single-user headless mode without a display manager and a GDM remote login mode.
+`setup-gnome-remote.sh` turns a Debian, Ubuntu, or other Debian-based server into a usable GNOME remote workstation through GNOME Remote Desktop/RDP. Besides [Tailscale](https://tailscale.com/), it can prepare SSH tunnels and WireGuard; audio, microphone, file access, USB-over-IP, webcam options, and WebAuthn/FIDO2 packages are selectable.
 
 ## Languages
 
@@ -10,15 +10,22 @@
 
 ## What it does
 
-On a Debian (or Debian-based) system with `systemd`, the script offers four independently selectable components (all pre-selected in an interactive `whiptail` checklist, all installed in an automated run). If GNOME + RDP is selected, it also asks for the GNOME-RDP mode:
+On a Debian (or Debian-based) system with `systemd`, the script offers selectable components, desktop profiles, webcam options, and private transports. If GNOME + RDP is selected, it also asks for the GNOME-RDP mode:
 
 - **GNOME + RDP**
   - **Single-user headless**: installs `gnome-session`, `gnome-shell`, `mutter`, and `gnome-remote-desktop`, enables `loginctl enable-linger` for a selected Linux user, and starts that user's `gnome-remote-desktop-headless.service`. The server keeps its previous default target, usually `multi-user.target`; no GDM is required.
   - **GDM remote login**: also installs `gdm3`, switches to `graphical.target`, and enables the system-wide GNOME remote login path. This is closer to a GNOME login screen, but intentionally brings in a display manager.
   - Generates a self-signed TLS certificate for RDP if none exists yet, configures it with `grdctl`, and asks interactively for RDP credentials — credentials are only ever passed to `grdctl`, never stored by the script itself.
-  - Restricts RDP (port 3389) via `ufw` to the `tailscale0` interface only.
-- **Audio (PipeWire)**: installs `pipewire`, `pipewire-pulse`, `wireplumber`, and enables them `--global` so audio is active even in the on-demand session started by headless RDP, without anyone having logged in interactively first.
-- **USB-over-IP (usbip)**: installs `usbip` and the kernel-matching `linux-tools-<kernel>` package, loads the `usbip-core`/`usbip_host`/`vhci-hcd` kernel modules persistently, writes a small `usbipd.service` unit (Ubuntu ships no ready-made one), and restricts port 3240 to `tailscale0` via `ufw`.
+  - Restricts RDP (port 3389) via `ufw` to selected private interfaces; with SSH tunnel mode, RDP is not opened directly.
+- **Desktop baseline**: default profile `workstation` installs a curated GNOME base with terminal, Files, Settings, portals, GVFS/FUSE/backends, keyring, fonts, system tools, and file access. `minimal` skips these extras; `ubuntu-desktop-minimal` is intended for Ubuntu only.
+- **File exchange**: installs portals and GVFS backends for clipboard/portal and file access in the remote session. It does not automatically expose a public file server.
+- **Audio (PipeWire)**: installs PipeWire including Pulse/ALSA, WirePlumber, GStreamer/PipeWire, and portal basics so speaker output and microphone input are prepared for GNOME RDP.
+- **USB-over-IP (usbip)**: installs the `linux-tools-<kernel>` package matching the running kernel, with Ubuntu HWE fallbacks, loads `usbip-core`/`usbip_host`/`vhci-hcd`, writes `usbipd.service`, and restricts port 3240 to private transports.
+- **Webcam**: `usbip-webcam` prepares physical USB webcams via USB-over-IP plus camera test tools. Optional `virtual-webcam` also installs `v4l2loopback`, `ffmpeg`, `pipewire-v4l2`, and V4L2 tools. Native webcam forwarding through GNOME RDP is not assumed to be reliable.
+- **Transports**:
+  - **Tailscale**: installs/enables Tailscale and allows RDP/usbip on `tailscale0`.
+  - **SSH tunnel**: installs/enables OpenSSH, allows SSH only, and prints local port-forwarding commands for RDP and optional usbip.
+  - **WireGuard**: installs WireGuard tools. A tunnel is only enabled when `GNOME_REMOTE_WIREGUARD_CONFIG=/path/wg0.conf` is set; otherwise the prerequisites are installed only.
 - **WebAuthn/FIDO2 (preparation only)**: installs `libfido2-1`, `libpam-u2f`, `fido2-tools`. PAM itself is **not** touched automatically — enabling a security key for login is a deliberate manual step (`pamu2fcfg`, then editing `/etc/pam.d/` by hand), to avoid ever locking yourself out of a headless server.
 
 Before touching the firewall at all, the script always allows SSH first (`ufw allow OpenSSH`), so a remote session can never lock itself out.
@@ -57,6 +64,16 @@ GNOME Remote Desktop does not guarantee that a GUI session keeps running after a
    sudo LAYOUT_SCRIPT_ASSUME_YES=1 GNOME_REMOTE_MODE=gdm-remote-login ./setup-gnome-remote.sh
    ```
 
+   Important environment options:
+
+   ```bash
+   GNOME_REMOTE_COMPONENTS=desktop-baseline,gnome-rdp,audio,usbip,webauthn
+   GNOME_REMOTE_DESKTOP_PROFILE=workstation        # workstation|minimal|ubuntu-desktop-minimal
+   GNOME_REMOTE_TRANSPORTS=tailscale,ssh-tunnel,wireguard
+   GNOME_REMOTE_WEBCAM=usbip,virtual               # usbip|virtual|none, combinable
+   GNOME_REMOTE_WIREGUARD_CONFIG=/root/wg0.conf    # optional
+   ```
+
 3. If prompted, authenticate Tailscale (`sudo tailscale up`) and re-run the script.
 
 4. Verify:
@@ -64,11 +81,20 @@ GNOME Remote Desktop does not guarantee that a GUI session keeps running after a
    ```bash
    systemctl get-default                 # single-user: should stay multi-user.target; GDM: graphical.target
    systemctl status tailscaled usbipd
-   ufw status verbose                    # RDP/usbip only on tailscale0
-   tailscale ip -4
+   ufw status verbose                    # RDP/usbip only over selected private transports
+   tailscale ip -4                       # if Tailscale was selected
+   wg show                               # if WireGuard is active
    ```
 
-5. From another device on the same tailnet, connect an RDP client to `<tailscale-ip>:3389` — depending on the selected mode, the connection lands in the single-user headless session or in GDM remote login.
+5. From another device, connect an RDP client to `<private-ip>:3389` over Tailscale/WireGuard. For SSH tunnels:
+
+   ```bash
+   ssh -L 3389:127.0.0.1:3389 <user>@<server>
+   # with usbip too:
+   ssh -L 3389:127.0.0.1:3389 -L 3240:127.0.0.1:3240 <user>@<server>
+   ```
+
+   Then point the RDP client at `localhost:3389`.
 
 ## License
 
